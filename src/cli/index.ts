@@ -1,4 +1,5 @@
 import path from "path";
+import { promises as fs } from "fs";
 import { run } from "../util.js";
 import {
   getAudioFiles,
@@ -75,9 +76,14 @@ async function processCommand(args: string[]): Promise<void> {
 
   // Count how many files have already been processed
   const log = await readProcessedLog(logFilePath);
-  const alreadyProcessed = audioFiles.filter(
-    (file) => log.processedFiles[file]?.success === true,
-  ).length;
+  const alreadyProcessed = audioFiles.filter((file) => {
+    // Check for exact match
+    if (log.processedFiles[file]?.success === true) return true;
+    // Check for legacy entries with "input\" prefix (Windows) or "input/" prefix (Unix)
+    if (log.processedFiles[`input\\${file}`]?.success === true) return true;
+    if (log.processedFiles[`input/${file}`]?.success === true) return true;
+    return false;
+  }).length;
 
   // Display file statistics
   displayFileStats(audioFiles.length, alreadyProcessed, processAll);
@@ -86,24 +92,48 @@ async function processCommand(args: string[]): Promise<void> {
   for (let i = 0; i < audioFiles.length; i++) {
     const file = audioFiles[i];
 
-    if (log.processedFiles?.[file]?.success === true) {
+    // Check if file is already processed BEFORE doing any work
+    // Check for exact match and legacy formats
+    const isProcessed = 
+      log.processedFiles?.[file]?.success === true ||
+      log.processedFiles?.[`input\\${file}`]?.success === true ||
+      log.processedFiles?.[`input/${file}`]?.success === true;
+    
+    if (isProcessed) {
       if (!processAll) {
-        continue; // Skip silently, will be shown in processFile
+        console.log(`\n📖 "${file}"`);
+        console.log(`   ⏭️  Already processed, skipping...`);
+        continue; // Skip entirely - don't copy, don't process
       }
     }
 
     const filePath = path.join(inputDir, file);
     const copyFilePath = path.join(outputDir, file);
 
-    // Copy file to output directory
-    run(dryRunMode, copyFile, filePath, copyFilePath);
+    // Check if the copy destination already exists (from a previous run)
+    // If it exists and we're not reprocessing, skip the copy to avoid overwriting locked files
+    let fileExists = false;
+    if (!processAll) {
+      try {
+        await fs.access(copyFilePath);
+        fileExists = true;
+      } catch {
+        fileExists = false;
+      }
+    }
 
-    // Process the copied file
+    // Copy file to output directory (only if it doesn't exist or we're reprocessing)
+    if (!fileExists || processAll) {
+      run(dryRunMode, copyFile, filePath, copyFilePath);
+    }
+
+    // Process the copied file (pass original filename for log checking)
     await processFile(
       dryRunMode,
       filePath,
       copyFilePath,
       logFilePath,
+      file, // Pass original filename for log checking
       !processAll,
       splitAfterTagging,
     );

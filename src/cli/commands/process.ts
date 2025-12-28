@@ -1,4 +1,5 @@
 import path from "path";
+import { promises as fs } from "fs";
 import { run } from "../../util.js";
 import { filenameToKeywords, processAudioFile } from "../../core/processors/audioProcessor.js";
 import { buildAudioMetadata, generateOutputFilename } from "../../core/processors/metadataBuilder.js";
@@ -147,6 +148,7 @@ async function handleSearchResults(
  * @param originalFilePath The original file path for logging
  * @param filePath The path of the file to process
  * @param logFilePath Path to the log file
+ * @param originalFilename The original filename from input directory (for log checking)
  * @param skipProcessed Whether to skip already processed files
  * @param splitAfterTagging Whether to split the file into chapters after tagging
  */
@@ -155,17 +157,23 @@ export async function processFile(
   originalFilePath: string,
   filePath: string,
   logFilePath: string,
+  originalFilename: string,
   skipProcessed: boolean = false,
   splitAfterTagging: boolean = false,
 ): Promise<void> {
   const filename = path.basename(filePath);
-  console.log(`\n📖 "${filename}"`);
-
-  // Initial check for already processed files
-  if (skipProcessed && (await isFileProcessed(logFilePath, filename))) {
-    console.log(`   ⏭️ Already processed, skipping...`);
-    return;
+  
+  // Check for already processed files FIRST - before any API calls or file operations
+  if (skipProcessed) {
+    const isProcessed = await isFileProcessed(logFilePath, originalFilename);
+    if (isProcessed) {
+      console.log(`\n📖 "${originalFilename}"`);
+      console.log(`   ⏭️  Already processed, skipping...`);
+      return;
+    }
   }
+  
+  console.log(`\n📖 "${originalFilename}"`);
 
   let selectedAsin: string | null = null;
   let success = false;
@@ -225,13 +233,29 @@ export async function processFile(
     const outputFilename = generateOutputFilename(title, authors, releaseYear, ext);
     const outputPath = path.join("./output", outputFilename);
     
-    run(dryRunMode, renameFile, filePath, outputPath);
+    // Only rename if the destination doesn't already exist (avoid EBUSY errors)
+    let finalFilePath = filePath; // Default to original path
+    if (!dryRunMode) {
+      try {
+        await fs.access(outputPath);
+        // Destination already exists, assume it was already renamed
+        console.log(`   ℹ️  Output file already exists, skipping rename: ${outputFilename}`);
+        finalFilePath = outputPath; // Use the existing renamed file
+      } catch {
+        // Destination doesn't exist, proceed with rename
+        await renameFile(filePath, outputPath);
+        finalFilePath = outputPath; // Use the newly renamed file
+      }
+    } else {
+      run(dryRunMode, renameFile, filePath, outputPath);
+      finalFilePath = outputPath;
+    }
 
     success = true;
     
     // If splitting is requested, split the tagged file into chapters
     if (splitAfterTagging && success) {
-      const taggedFilePath = dryRunMode ? filePath : outputPath;
+      const taggedFilePath = dryRunMode ? filePath : finalFilePath;
       
       // Ask user for confirmation before splitting
       const splitConfirm = await question(
@@ -301,7 +325,7 @@ export async function processFile(
       dryRunMode,
       markFileProcessed,
       logFilePath,
-      originalFilePath,
+      originalFilename, // Use original filename for log entry (not full path)
       selectedAsin ?? "",
       title,
       success,

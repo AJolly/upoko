@@ -13,7 +13,25 @@ export async function isFileProcessed(
   filename: string,
 ): Promise<boolean> {
   const log = await readProcessedLog(logFilePath);
-  return log.processedFiles[filename]?.success === true;
+  
+  // Check for exact match first
+  if (log.processedFiles[filename]?.success === true) {
+    return true;
+  }
+  
+  // Check for legacy entries with "input\" prefix (Windows) or "input/" prefix (Unix)
+  const withInputPrefix = `input\\${filename}`;
+  const withInputPrefixUnix = `input/${filename}`;
+  
+  if (log.processedFiles[withInputPrefix]?.success === true) {
+    return true;
+  }
+  
+  if (log.processedFiles[withInputPrefixUnix]?.success === true) {
+    return true;
+  }
+  
+  return false;
 }
 
 /**
@@ -115,12 +133,58 @@ export async function copyFile(source: string, destination: string): Promise<voi
 }
 
 /**
- * Rename a file
+ * Rename a file with retry logic for Windows file locking issues
  * @param oldPath Current file path
  * @param newPath New file path
+ * @param maxRetries Maximum number of retry attempts (default: 5)
+ * @param retryDelay Initial delay between retries in ms (default: 100)
  */
-export async function renameFile(oldPath: string, newPath: string): Promise<void> {
-  await fs.rename(oldPath, newPath);
+export async function renameFile(
+  oldPath: string,
+  newPath: string,
+  maxRetries: number = 5,
+  retryDelay: number = 100
+): Promise<void> {
+  let lastError: Error | null = null;
+  
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      // Check if source file exists
+      try {
+        await fs.access(oldPath);
+      } catch {
+        // Source doesn't exist, check if destination already exists (already renamed)
+        try {
+          await fs.access(newPath);
+          // Destination exists, assume rename already happened
+          return;
+        } catch {
+          throw new Error(`Source file does not exist: ${oldPath}`);
+        }
+      }
+      
+      await fs.rename(oldPath, newPath);
+      return; // Success
+    } catch (error: any) {
+      lastError = error;
+      
+      // If it's not a locking error (EBUSY) or file in use error, throw immediately
+      if (error.code !== 'EBUSY' && error.code !== 'EACCES' && error.code !== 'EPERM') {
+        throw error;
+      }
+      
+      // For locking errors, wait and retry with exponential backoff
+      if (attempt < maxRetries - 1) {
+        const delay = retryDelay * Math.pow(2, attempt);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+    }
+  }
+  
+  // If we get here, all retries failed
+  throw new Error(
+    `Failed to rename file after ${maxRetries} attempts: ${lastError?.message || 'Unknown error'}`
+  );
 }
 
 /**

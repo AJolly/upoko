@@ -886,6 +886,7 @@ export async function split(args: string[]): Promise<void> {
           inputPath,
           inputPath, // Use original file as both source and target for tagging
           path.join(outputDir, "processed_files.json"),
+          path.basename(inputPath), // originalFilename for log checking
           false, // don't skip processed
           false  // don't split after tagging (we'll do it here)
         );
