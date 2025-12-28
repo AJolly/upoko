@@ -625,6 +625,8 @@ async function getChaptersInfo(
     const nameWithoutExt = path.parse(filename).name;
     let keywords = nameWithoutExt.replace(/[_\-.]+/g, " ");
     keywords = keywords.replace(/\b(unabridged|audiobook|mp3|m4b|aax|audio)\b/gi, "");
+    // Remove leading zeros from book numbers (e.g., "Book 003" -> "Book 3")
+    keywords = keywords.replace(/\b(book)\s+0+(\d+)\b/gi, (match, book, num) => `${book} ${num}`);
     keywords = keywords.replace(/\s+/g, " ").trim();
     
     console.log(`\nSearching for audiobook: "${keywords}"`);
@@ -638,7 +640,7 @@ async function getChaptersInfo(
       }
 
       const searchResults = await searchAudibleBooks(keywords);
-      selectedAsin = await handleSearchResults(searchResults);
+      selectedAsin = await handleSearchResults(searchResults, filename);
       manualSearch = selectedAsin === null;
     } while (manualSearch);
 
@@ -698,13 +700,93 @@ async function getChaptersInfo(
 }
 
 /**
+ * Extract book number from filename or keywords
+ * @param filenameOrKeywords The filename or search keywords
+ * @returns The book number if found, or null
+ */
+function extractBookNumber(filenameOrKeywords: string): number | null {
+  // Try to match "Book 3", "Book 003", "book 3", etc.
+  const match = filenameOrKeywords.match(/\b(?:book|bk)\s+0*(\d+)\b/i);
+  if (match && match[1]) {
+    const bookNum = parseInt(match[1], 10);
+    return isNaN(bookNum) ? null : bookNum;
+  }
+  return null;
+}
+
+/**
+ * Find the best matching search result based on book number
+ * @param searchResults The search results
+ * @param bookNumber The book number to match
+ * @returns The index of the best match, or -1 if no clear match
+ */
+function findBestMatch(searchResults: AudibleSearchResponse, bookNumber: number): number {
+  if (!searchResults.products || searchResults.products.length === 0) {
+    return -1;
+  }
+
+  // Look for exact book number matches in the title
+  const exactMatches: number[] = [];
+  for (let i = 0; i < searchResults.products.length; i++) {
+    const product = searchResults.products[i];
+    const title = product.title.toLowerCase();
+    
+    // Match patterns like "Book 3", "3", "He Who Fights with Monsters 3"
+    // Prefer matches after "book" or at the end of the title, or as standalone number
+    // Avoid matching "3" in "13", "30", "103", etc.
+    const patterns = [
+      // "Book 3" or "book 3" - highest priority
+      new RegExp(`\\b(?:book|bk)\\s+${bookNumber}\\b`, 'i'),
+      // "3" at the end of title (e.g., "He Who Fights with Monsters 3")
+      new RegExp(`\\s+${bookNumber}\\b$`, 'i'),
+      // "3" as standalone word (not part of larger number)
+      new RegExp(`(?:^|\\s)${bookNumber}(?:\\s|$)`, 'i'),
+    ];
+    
+    for (const pattern of patterns) {
+      if (pattern.test(title)) {
+        exactMatches.push(i);
+        break;
+      }
+    }
+  }
+
+  // If there's exactly one exact match, return it
+  if (exactMatches.length === 1) {
+    return exactMatches[0];
+  }
+
+  // If multiple matches, prefer the first one (usually most relevant)
+  if (exactMatches.length > 1) {
+    return exactMatches[0];
+  }
+
+  return -1;
+}
+
+/**
  * Handle search results and prompt for selection
  * @param searchResults The API response to display
+ * @param filenameOrKeywords Optional filename or keywords for smart matching
  * @returns Promise resolving to the selected product ASIN or null if manual search requested
  */
 async function handleSearchResults(
-  searchResults: AudibleSearchResponse
+  searchResults: AudibleSearchResponse,
+  filenameOrKeywords?: string
 ): Promise<string | null> {
+  // Try smart matching if filename/keywords provided
+  if (filenameOrKeywords) {
+    const bookNumber = extractBookNumber(filenameOrKeywords);
+    if (bookNumber !== null) {
+      const bestMatchIndex = findBestMatch(searchResults, bookNumber);
+      if (bestMatchIndex >= 0) {
+        const matchedProduct = searchResults.products[bestMatchIndex];
+        console.log(`\n   ✅ Auto-selected: "${matchedProduct.title}" (Book ${bookNumber})`);
+        return matchedProduct.asin;
+      }
+    }
+  }
+
   displaySearchResults(searchResults);
   
   const hasProducts = searchResults.products && searchResults.products.length > 0;
@@ -718,7 +800,7 @@ async function handleSearchResults(
   
   if (selectedIndex === -1) {
     console.error("Invalid selection. Please enter a valid number from the list.");
-    return handleSearchResults(searchResults);
+    return handleSearchResults(searchResults, filenameOrKeywords);
   }
 
   return searchResults.products[selectedIndex].asin;

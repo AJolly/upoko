@@ -62,6 +62,9 @@ export function filenameToKeywords(filename: string): string {
     "",
   );
 
+  // Remove leading zeros from book numbers (e.g., "Book 003" -> "Book 3")
+  keywords = keywords.replace(/\b(book)\s+0+(\d+)\b/gi, (match, book, num) => `${book} ${num}`);
+
   // Clean up extra spaces
   keywords = keywords.replace(/\s+/g, " ").trim();
 
